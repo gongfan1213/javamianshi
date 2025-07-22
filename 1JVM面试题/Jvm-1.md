@@ -30,4 +30,5 @@ native memory.
 ```
 java -XX:+PrintFlagsInitial
 ```
-image.png
+
+<img width="606" height="149" alt="image" src="https://github.com/user-attachments/assets/f50cd038-0463-4eb1-bdf4-082e7450f0b8" />
