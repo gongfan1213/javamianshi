@@ -107,10 +107,10 @@ nano env
 
 项目已预配置开发环境所需的API和数据库连接：
 
-- **OpenAI兼容API**: `https://bmc-llm-relay.bluemediagroup.cn/v1`
+- **OpenAI兼容API**: `https:/xxxx/v1`
 - **模型**: `gemini-2.5-pro`
-- **Redis**: `r-2zeodfdqjw1knkrto0pd.redis.rds.aliyuncs.com:6379`
-- **LangSmith项目**: `bluelab-opengraph-dev`
+- **Redis**: `rxxxxx9`
+- **LangSmith项目**: `xxxxv`
 
 ### 启动服务
 
@@ -559,7 +559,7 @@ class PromptManager:
 
 ### 配置信息
 
-- **API Key**: `jina_b17bde3cc6d749ae93c5bfae2d212236Jj0FH7SW_jMA3r5_grSai73BJZEO`
+- **API Key**: `xxxx`
 - **Base URL**: `https://r.jina.ai/`
 - **搜索深度**: 每次查询最多10个结果
 
