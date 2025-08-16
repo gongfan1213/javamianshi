@@ -1,0 +1,309 @@
+# 🔗 Loomi流式事件恢复API联调文档（混合模式版）
+
+## 🎯 核心功能
+
+支持用户在任务进行中离开又回来的场景：
+- **纯回放模式**：任务已完成，只需回放历史事件
+- **纯实时模式**：无历史事件，直接接收实时流
+- **🎯 混合模式**：先回放历史事件，再切换到实时流（核心新增）
+
+## 🛠 API接口（仅2个）
+
+### 1. **用户心跳接口**
+```http
+POST /api/loomi/heartbeat
+```
+
+**请求体**：
+```json
+{
+    "user_id": "user123",
+    "session_id": "session456"
+}
+```
+
+**成功响应**：
+```json
+{
+    "success": true,
+    "timestamp": "2024-01-01T10:30:00Z",
+    "message": "心跳更新成功"
+}
+```
+
+**失败响应**：
+```json
+{
+    "success": false,
+    "timestamp": "2024-01-01T10:30:00Z",
+    "error": "心跳处理失败: 错误详情"
+}
+```
+
+**说明**：前端每5秒调用一次，后端记录用户最后活跃时间，用于检测断网
+
+### 2. **智能流式回放接口**
+```http
+GET /api/loomi/stream/{user_id}/{session_id}
+```
+
+**路径参数**：
+- `user_id` (str): 用户ID，用于心跳检测和用户活跃度判断
+- `session_id` (str): 会话ID，对应具体的任务会话
+
+**响应类型**：Server-Sent Events (SSE)
+
+#### 场景1：无需回放
+```
+data: {"type": "no_replay", "message": "无需回放", "reason": "normal"}
+```
+
+#### 场景2：纯回放模式（任务已完成）
+```
+data: {"type": "replay_start", "total": 15, "reason": "has_disconnect_events"}
+
+data: {"event_type":"LLM_CHUNK","agent_source":"loomi_insight_agent","timestamp":"2024-01-01T10:30:00Z","payload":{"content_type":"nova3_insight","data":"洞察内容","metadata":{"is_replay":true,"replay_progress":"1/15","is_after_disconnect":true}}}
+
+data: {"type": "replay_complete", "message": "已回放15个事件"}
+```
+
+#### 场景3：纯实时模式（无历史事件，任务进行中）
+```
+data: {"type": "realtime_start", "message": "开始接收实时流", "session_id": "session123"}
+
+data: {"event_type":"LLM_CHUNK","agent_source":"loomi_profile_agent","timestamp":"2024-01-01T10:31:00Z","payload":{"content_type":"nova3_profile","data":"画像内容","metadata":{"is_replay":false,"is_realtime":true}}}
+
+data: {"type": "task_complete", "message": "任务已完成"}
+```
+
+#### 场景4：🎯 混合模式（有历史事件，任务进行中）
+```
+data: {"type": "hybrid_start", "phase": "replay", "total": 10, "message": "开始回放历史事件"}
+
+data: {"event_type":"LLM_CHUNK","agent_source":"loomi_insight_agent","timestamp":"2024-01-01T10:25:00Z","payload":{"content_type":"nova3_insight","data":"历史洞察","metadata":{"is_replay":true,"replay_progress":"1/10","hybrid_phase":"replay","is_after_disconnect":true}}}
+
+data: {"type": "hybrid_transition", "phase": "realtime", "message": "回放完成，切换到实时流"}
+
+data: {"event_type":"LLM_CHUNK","agent_source":"loomi_profile_agent","timestamp":"2024-01-01T10:31:00Z","payload":{"content_type":"nova3_profile","data":"实时画像","metadata":{"is_replay":false,"is_realtime":true,"hybrid_phase":"realtime"}}}
+
+data: {"type": "hybrid_complete", "message": "混合流模式完成，任务已结束"}
+```
+
+#### 错误场景
+```
+data: {"type": "error", "message": "回放失败: 错误详情"}
+```
+
+**说明**：
+- 页面加载时调用，需要提供明确的 user_id 和 session_id
+- 后端自动判断模式（纯回放/纯实时/混合模式）
+- SSE连接保持，直到任务完成或发生错误
+
+## 🔄 混合模式工作流程
+
+### 典型场景：用户任务进行中离开又回来
+```
+时间轴: 0min ----3min---- 6min ----10min
+用户:   在线    离开     回来      任务完成
+任务:   [========== 持续执行中 ==========]
+处理:           [--回放--][--实时--]
+
+1. 用户6min回来 → 调用 GET /api/loomi/stream/{user_id}/{session_id}
+2. 后端检测：
+   - needs_replay: true (3-6min有历史事件)
+   - is_task_running: true (任务还在进行)
+3. 返回hybrid_start → 回放3-6min事件
+4. 返回hybrid_transition → 切换到实时流
+5. 持续返回实时事件直到任务完成
+6. 返回hybrid_complete → 连接关闭
+```
+
+### 智能模式选择逻辑
+```
+IF needs_replay = false:
+    IF is_task_running = true:
+        → realtime_start (纯实时模式)
+    ELSE:
+        → no_replay (无需处理)
+        
+IF needs_replay = true:
+    IF is_task_running = true:
+        → hybrid_start (🎯 混合模式)
+    ELSE:
+        → replay_start (纯回放模式)
+```
+
+## 🧪 API测试方案
+
+### 1. 基础功能测试
+```bash
+# 测试心跳接口
+curl -X POST "http://localhost:8000/api/loomi/heartbeat" \
+     -H "Content-Type: application/json" \
+     -d '{"user_id": "test-user", "session_id": "test-session"}'
+
+# 预期返回：{"success": true, "timestamp": "...", "message": "心跳更新成功"}
+```
+
+```bash
+# 测试智能流式接口
+curl -X GET "http://localhost:8000/api/loomi/stream/test-user/test-session" \
+     -H "Accept: text/event-stream"
+
+# 预期返回SSE流，根据情况返回不同模式的事件
+```
+
+### 2. 混合模式测试场景
+```bash
+# 场景：模拟用户任务进行中离开又回来
+# 1. 启动一个长时间任务（10分钟）
+# 2. 用户3分钟时离开（停止心跳发送）
+# 3. 用户6分钟时回来（调用stream接口）
+# 4. 预期：返回hybrid_start，先回放3-6分钟事件，再切换到实时流
+```
+
+### 3. 不同模式验证
+```bash
+# 纯回放模式：任务已完成，有历史事件
+# 预期SSE：replay_start → 事件流 → replay_complete
+
+# 纯实时模式：任务进行中，无历史事件  
+# 预期SSE：realtime_start → 实时事件流 → task_complete
+
+# 混合模式：任务进行中，有历史事件
+# 预期SSE：hybrid_start → 历史事件流 → hybrid_transition → 实时事件流 → hybrid_complete
+```
+
+## 🔍 后端调试指南
+
+### 1. 数据库状态检查
+```sql
+-- 检查事件存储
+SELECT COUNT(*) as total_events FROM loomi_stream_events;
+SELECT session_id, user_id, event_type, is_after_disconnect, is_session_complete 
+FROM loomi_stream_events ORDER BY created_at DESC LIMIT 10;
+
+-- 检查任务状态
+SELECT session_id, COUNT(*) as event_count, 
+       MAX(CASE WHEN is_session_complete = true THEN 1 ELSE 0 END) as is_completed,
+       MAX(created_at) as last_event_time
+FROM loomi_stream_events 
+GROUP BY session_id 
+ORDER BY last_event_time DESC LIMIT 5;
+```
+
+### 2. 后端日志监控
+```
+✅ 正常日志：
+[INFO] StreamStorage: ✅ 已初始化 (loomi_stream_events表) - 简化版  
+[INFO] 异步存储流式事件成功
+[INFO] 心跳更新成功: user_id=xxx, session_id=xxx
+[INFO] 混合模式开始：replay阶段，共X个历史事件
+
+❌ 错误日志：
+[ERROR] 异步存储流式事件失败: ...
+[ERROR] 更新心跳失败: ...
+[ERROR] 检查任务状态失败: ...
+[ERROR] 混合流失败: ...
+```
+
+### 3. API响应验证
+```bash
+# 验证心跳API响应格式
+curl -s -X POST "/api/loomi/heartbeat" \
+     -H "Content-Type: application/json" \
+     -d '{"user_id":"test","session_id":"test"}' | jq
+
+# 验证SSE流格式
+curl -s "/api/loomi/stream/test-user/test-session" \
+     -H "Accept: text/event-stream" | head -20
+```
+
+## 🚨 常见问题排查
+
+### Q1: 心跳API返回失败
+**症状**：`{"success": false, "error": "..."}`
+**排查**：
+1. 检查数据库连接是否正常
+2. 确认`loomi_stream_events`表已创建
+3. 检查后端日志中的具体错误信息
+
+### Q2: SSE流返回错误
+**症状**：`{"type": "error", "message": "..."}`
+**排查**：
+1. 确认session_id对应的数据存在
+2. 检查`check_task_status()`方法是否正常工作
+3. 验证`get_events_after_timestamp()`查询逻辑
+
+### Q3: 混合模式不触发
+**症状**：期望返回hybrid_start但返回了其他类型
+**排查**：
+1. 确认`needs_replay=true`且`is_task_running=true`
+2. 检查`is_after_disconnect`字段是否正确设置
+3. 验证任务完成时是否调用了`mark_task_complete()`
+
+## 📋 后端部署检查清单
+
+### 数据库准备
+- [ ] 执行`utils/database/migrations/create_stream_recovery_tables_simple.sql`
+- [ ] 确认`loomi_stream_events`表创建成功，包含混合模式字段
+- [ ] 验证触发器`trigger_update_user_last_seen`工作正常
+
+### 后端代码部署
+- [ ] `apis/recovery_routes_simple.py` - 混合模式API已集成
+- [ ] `utils/database/stream_storage_simple.py` - 存储层方法已实现
+- [ ] `agents/loomi/base_loomi_agent.py` - Agent自动存储已集成
+- [ ] 重启应用，确认API路由注册成功
+
+### Agent代码集成
+- [ ] 确保Agent调用`agent.set_current_session(user_id, session_id)`
+- [ ] 任务完成时调用`await agent.mark_task_complete()`（可选但推荐）
+- [ ] 验证`emit_loomi_event`能自动存储到数据库
+
+### API接口验证
+- [ ] `POST /api/loomi/heartbeat` 返回正确格式
+- [ ] `GET /api/loomi/stream/{session_id}` 支持4种场景
+- [ ] SSE连接能正常建立并推送事件
+- [ ] 错误情况能正确返回error类型事件
+
+## 🎯 联调成功标志
+
+### 后端日志验证
+```
+✅ 看到这些日志说明成功：
+[INFO] StreamStorage: ✅ 已初始化 (loomi_stream_events表) - 简化版
+[INFO] 异步存储流式事件成功
+[INFO] 混合模式开始：replay阶段，共X个历史事件
+[INFO] 任务session123已标记为完成
+```
+
+### API响应验证
+```bash
+# 心跳API返回成功
+curl /api/loomi/heartbeat → {"success": true, ...}
+
+# 流式API根据情况返回不同模式
+curl /api/loomi/stream/xxx → hybrid_start|replay_start|realtime_start|no_replay
+```
+
+### 数据库验证
+```sql
+-- 能看到事件正常存储
+SELECT COUNT(*) FROM loomi_stream_events; -- > 0
+
+-- 混合模式字段正确设置
+SELECT is_after_disconnect, is_session_complete FROM loomi_stream_events LIMIT 5;
+```
+
+## 🚀 混合模式 vs 原方案对比
+
+| 特性 | 原极简版 | 混合模式版 |
+|-----|---------|-----------|
+| 支持场景 | 纯回放 | **回放+实时流** ✨ |
+| 任务进行中断网 | ❌ 不支持 | **✅ 完全支持** |
+| API接口数量 | 2个 | **2个** (保持不变) |
+| 后端复杂度 | 简单 | 适中 |
+| 用户体验 | 基础 | **无缝连续** 🎯 |
+
+**现在后端已完全支持用户任务进行中离开又回来的场景！**  
+前端团队只需要按照上述API格式进行调用即可。🎉 
